@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "MAKRO_SERVICE": {
+      "commandName": "Project",
+      "commandLineArgs": "key: KEY_R, action: pressed, keycode: 19"
+    }
+  }
+}

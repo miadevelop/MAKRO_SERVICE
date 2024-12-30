@@ -1,0 +1,40 @@
+# Build artifacts
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.metadata.v7.bin
+
+# Publish profiles
+Properties/PublishProfiles/
+
+# Logs
+logs/
+*.log
+
+# Configuration files (überprüfen, ob diese ausgeschlossen werden sollen)
+config.json
+key_mapping.json
+
+# Runtime files
+*.runtimeconfig.json
+
+# Packages
+*.nupkg
+*.snupkg
+
+# IDE specific
+.vscode/
+.idea/
+
+# Backup and temporary files
+*.bak
+*.swp
+*.tmp
+~$*
+
+# Rider IDE
+*.iml
