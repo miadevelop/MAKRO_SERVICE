@@ -12,29 +12,6 @@ using System.Threading;
 
 namespace MAKRO_SERVICE
 {
-    public class KeyMapping
-    {
-        public Dictionary<string, KeyMappingEntry> key_mapping { get; set; }
-    }
-
-    public class KeyMappingEntry
-    {
-        public string description { get; set; }
-        public string execution { get; set; }
-        public string application { get; set; }
-    }
-
-    public class ProcessInfo
-    {
-        public int ProcessId { get; set; }
-        public string ProgramName { get; set; }
-        public string ExecutionPath { get; set; }
-    }
-
-    public class ProcessLog
-    {
-        public List<ProcessInfo> ProcessInfos { get; set; } = new List<ProcessInfo>();
-    }
 
     class Program
     {
@@ -52,44 +29,43 @@ namespace MAKRO_SERVICE
 
         private const int SW_SHOW = 5;
         private const int MillisecondsDelay = 1000;
-
         static async Task Main(string[] args)
         {
             XmlConfigurator.Configure(new FileInfo("log4net.config"));
             log.Info("MAKRO_SERVICE started");
 
             var keyMapping = LoadKeyMapping();
-            if (keyMapping != null)
-            {
-                log.Info("Key Mapping erfolgreich geladen.");
-                if (args.Length > 0)
-                {
-                    string input = string.Join(" ", args);
-                    log.Info($"Eingabe: {input}");
-                    int keycode = ExtractKeycode(input);
-                    log.Info($"Extracted Keycode: {keycode}");
-
-                    if (keycode != -1 && keyMapping.key_mapping.ContainsKey(keycode.ToString()))
-                    {
-                        var entry = keyMapping.key_mapping[keycode.ToString()];
-                        log.Info($"Keycode: {keycode}, Beschreibung: {entry.description}, Ausführung: {entry.execution}, Anwendung: {entry.application}");
-                        await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
-                    }
-                    else
-                    {
-                        log.Error($"Keycode '{keycode}' nicht gefunden im Key Mapping oder ungültige Eingabe.");
-                    }
-                }
-                else
-                {
-                    displayMappingList(keyMapping);
-                }
-            }
-            else
+            if (keyMapping == null)
             {
                 log.Error("Fehler beim Laden des Key Mappings.");
+                return;
             }
+
+            log.Info("Key Mapping erfolgreich geladen.");
+
+            if (args.Length == 0)
+            {
+                displayMappingList(keyMapping);
+                return;
+            }
+
+            string input = string.Join(" ", args);
+            log.Info($"Eingabe: {input}");
+
+            int keycode = ExtractKeycode(input);
+            log.Info($"Extracted Keycode: {keycode}");
+
+            if (keycode == -1 || !keyMapping.key_mapping.ContainsKey(keycode.ToString()))
+            {
+                log.Error($"Keycode '{keycode}' nicht gefunden im Key Mapping oder ungültige Eingabe.");
+                return;
+            }
+
+            var entry = keyMapping.key_mapping[keycode.ToString()];
+            log.Info($"Keycode: {keycode}, Beschreibung: {entry.description}, Ausführung: {entry.execution}, Anwendung: {entry.application}");
+            await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
         }
+
 
         static async Task ExecuteProgramAsync(string execution, int millisecondsDelay)
         {
