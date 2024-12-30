@@ -12,7 +12,6 @@ using System.Threading;
 
 namespace MAKRO_SERVICE
 {
-
     class Program
     {
         private static readonly ILog log = LogManager.GetLogger(typeof(Program));
@@ -29,6 +28,7 @@ namespace MAKRO_SERVICE
 
         private const int SW_SHOW = 5;
         private const int MillisecondsDelay = 1000;
+
         static async Task Main(string[] args)
         {
             XmlConfigurator.Configure(new FileInfo("log4net.config"));
@@ -65,7 +65,6 @@ namespace MAKRO_SERVICE
             log.Info($"Keycode: {keycode}, Beschreibung: {entry.description}, Ausführung: {entry.execution}, Anwendung: {entry.application}");
             await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
         }
-
 
         static async Task ExecuteProgramAsync(string execution, int millisecondsDelay)
         {
@@ -126,6 +125,15 @@ namespace MAKRO_SERVICE
                     if (process != null)
                     {
                         SaveProcessInfo(process.Id, programFileName, execution);
+
+                        // Verzögerung hinzufügen, um sicherzustellen, dass das Programm korrekt gestartet wurde
+                        await Task.Delay(500);
+
+                        // Fenster in den Vordergrund holen
+                        ShowWindow(process.MainWindowHandle, SW_SHOW);
+                        SetForegroundWindow(process.MainWindowHandle);
+
+                        log.Info($"Programm gestartet: {execution}");
                         await process.WaitForExitAsync();
                     }
                 }
@@ -219,4 +227,6 @@ namespace MAKRO_SERVICE
             return -1;
         }
     }
+
+    // Zusätzliche Klassen (ProcessLog, ProcessInfo, KeyMapping) müssen wie zuvor definiert werden
 }
