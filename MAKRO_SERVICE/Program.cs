@@ -115,12 +115,14 @@ namespace MAKRO_SERVICE
 
             await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
         }
-
         static async Task ExecuteProgramAsync(string execution, int millisecondsDelay)
         {
             string programFileName = Path.GetFileName(execution);
+            log.Info($"Starte ExecuteProgramAsync für {programFileName}");
 
             await _semaphore.WaitAsync();
+            log.Info("Semaphore erhalten");
+
             try
             {
                 if (_runningTasks.TryGetValue(programFileName, out var existingTask) && !existingTask.IsCompleted)
@@ -129,17 +131,24 @@ namespace MAKRO_SERVICE
                     return;
                 }
 
-                
-
+                log.Info($"Starte ExecuteProgramInternalAsync für {programFileName}");
                 var task = ExecuteProgramInternalAsync(execution, millisecondsDelay);
                 _runningTasks[programFileName] = task;
                 await task;
+                log.Info($"ExecuteProgramInternalAsync für {programFileName} abgeschlossen");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Fehler in ExecuteProgramAsync: {ex.Message}");
             }
             finally
             {
                 _semaphore.Release();
+                log.Info("Semaphore freigegeben");
             }
         }
+
+       
 
         static async Task ExecuteProgramInternalAsync(string execution, int millisecondsDelay)
         {
