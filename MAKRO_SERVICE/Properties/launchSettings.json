@@ -2,7 +2,7 @@
   "profiles": {
     "MAKRO_SERVICE": {
       "commandName": "Project",
-      "commandLineArgs": "key: KEY_R, action: pressed, keycode: 19"
+      "commandLineArgs": "key: KEY_U, action: pressed, keycode: 22"
     }
   }
 }

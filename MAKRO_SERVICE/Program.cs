@@ -15,24 +15,33 @@ namespace MAKRO_SERVICE
     class Program
     {
         private static readonly ILog log = LogManager.GetLogger(typeof(Program));
-        private static readonly string processLogFilePath = Path.Combine(Directory.GetCurrentDirectory(), "process_log.json");
+        private static readonly string _processLogFilePath = Path.Combine(Directory.GetCurrentDirectory(), "process_log.json");
         private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
         private static readonly Dictionary<string, Task> _runningTasks = new Dictionary<string, Task>();
+        private static ProcessLog _ProcessLog;
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); 
+     
 
         [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
 
+        private const int SW_RESTORE = 9;
         private const int SW_SHOW = 5;
         private const int MillisecondsDelay = 1000;
+        const string ACTION = "pressed";
+       
+
 
         static async Task Main(string[] args)
         {
             XmlConfigurator.Configure(new FileInfo("log4net.config"));
             log.Info("MAKRO_SERVICE started");
+            log.Info($"Process log: {_processLogFilePath}");
 
             var keyMapping = LoadKeyMapping();
             if (keyMapping == null)
@@ -52,7 +61,16 @@ namespace MAKRO_SERVICE
             string input = string.Join(" ", args);
             log.Info($"Eingabe: {input}");
 
-            int keycode = ExtractKeycode(input);
+            
+            KeyInfo keyInfo = ExtractKeyInfo(input);
+            int keycode = keyInfo.Keycode;
+           
+            if (!keyInfo.Action.ToLower().Contains(ACTION))
+            {
+                log.Error($"Keycode '{keycode}', {keyInfo.Action}, abborted!");
+                return;
+            }
+
             log.Info($"Extracted Keycode: {keycode}");
 
             if (keycode == -1 || !keyMapping.key_mapping.ContainsKey(keycode.ToString()))
@@ -63,6 +81,38 @@ namespace MAKRO_SERVICE
 
             var entry = keyMapping.key_mapping[keycode.ToString()];
             log.Info($"Keycode: {keycode}, Beschreibung: {entry.description}, Ausführung: {entry.execution}, Anwendung: {entry.application}");
+
+            if (!System.IO.File.Exists(_processLogFilePath))
+            {
+                SaveProcessInfo(0, "", "");
+            }
+            _ProcessLog = LoadProcessLog();
+            string applicationName=System.IO.Path.GetFileName(entry.execution);
+
+            ProcessInfo processInfoLastRun = GetProcessLogInfoByName(applicationName);
+
+            //IsLastRunInTimeSpan(ProcessInfo processInfoLastRun, int milliseconds)
+           
+            if( IsProcessIdRunning(processInfoLastRun.ProcessId))
+            {
+                log.Info($"Prozess läuft schon, IsProcessIdRunning: {processInfoLastRun.ProcessId}, {processInfoLastRun.ProgramName} ");
+                SwitchToProcess(processInfoLastRun.ProcessId);
+                SaveProcessInfo(processInfoLastRun.ProcessId, processInfoLastRun.ProgramName, processInfoLastRun.ExecutionPath);
+                await Task.Delay(MillisecondsDelay);
+                return;
+            }
+
+            int? currentProcessID = FindProcessIdByName(processInfoLastRun.ProgramName);
+            if (currentProcessID.HasValue)
+            {
+                log.Info($"Prozess läuft schon, FindProcessIdByName: {currentProcessID.Value}, {processInfoLastRun.ProgramName}");
+                SwitchToProcess(currentProcessID.Value);
+                SaveProcessInfo(processInfoLastRun.ProcessId, processInfoLastRun.ProgramName, processInfoLastRun.ExecutionPath);
+                await Task.Delay(MillisecondsDelay);
+                return;
+            }
+
+
             await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
         }
 
@@ -78,6 +128,8 @@ namespace MAKRO_SERVICE
                     log.Info($"Programm '{programFileName}' wird bereits ausgeführt.");
                     return;
                 }
+
+                
 
                 var task = ExecuteProgramInternalAsync(execution, millisecondsDelay);
                 _runningTasks[programFileName] = task;
@@ -127,7 +179,7 @@ namespace MAKRO_SERVICE
                         SaveProcessInfo(process.Id, programFileName, execution);
 
                         // Verzögerung hinzufügen, um sicherzustellen, dass das Programm korrekt gestartet wurde
-                        await Task.Delay(500);
+                        await Task.Delay(MillisecondsDelay);
 
                         // Fenster in den Vordergrund holen
                         ShowWindow(process.MainWindowHandle, SW_SHOW);
@@ -157,6 +209,8 @@ namespace MAKRO_SERVICE
             if (existingProcessInfo != null)
             {
                 existingProcessInfo.ProcessId = processId;
+                existingProcessInfo.LastRun = DateTime.Now;
+                existingProcessInfo.Counter++;
             }
             else
             {
@@ -164,23 +218,45 @@ namespace MAKRO_SERVICE
                 {
                     ProcessId = processId,
                     ProgramName = programName,
-                    ExecutionPath = executionPath
+                    ExecutionPath = executionPath,
+                    LastRun = DateTime.Now,
+                    Counter = 1
                 });
             }
 
             string json = JsonSerializer.Serialize(processLog);
-            File.WriteAllText(processLogFilePath, json);
+            File.WriteAllText(_processLogFilePath, json);
         }
 
         static ProcessLog LoadProcessLog()
         {
-            if (File.Exists(processLogFilePath))
+            try
             {
-                string json = File.ReadAllText(processLogFilePath);
-                return JsonSerializer.Deserialize<ProcessLog>(json) ?? new ProcessLog();
+                if (File.Exists(_processLogFilePath))
+                {
+                    string json = File.ReadAllText(_processLogFilePath);
+                    return JsonSerializer.Deserialize<ProcessLog>(json) ?? new ProcessLog();
+                }
+                return new ProcessLog();
             }
-            return new ProcessLog();
+            catch (Exception ex)
+            {
+
+                log.Error(ex.Message);
+                return null;
+            }
         }
+        public static ProcessInfo GetProcessLogInfoByName(string programName)
+        {
+            if (_ProcessLog == null || _ProcessLog.ProcessInfos == null)
+            {
+                return null;
+            }
+
+            return _ProcessLog.ProcessInfos.FirstOrDefault(p =>
+                p.ProgramName.Equals(programName, StringComparison.OrdinalIgnoreCase));
+        }
+
 
         static void displayMappingList(KeyMapping keyMapping)
         {
@@ -217,16 +293,99 @@ namespace MAKRO_SERVICE
             }
         }
 
-        static int ExtractKeycode(string input)
+        static KeyInfo ExtractKeyInfo(string input)
         {
-            var match = Regex.Match(input, @"keycode:\s*(\d+)");
-            if (match.Success && int.TryParse(match.Groups[1].Value, out int keycode))
+            var keycodeMatch = Regex.Match(input, @"keycode:\s*(\d+)");
+            var actionMatch = Regex.Match(input, @"action:\s*(pressed|released)");
+
+            if (keycodeMatch.Success && actionMatch.Success)
             {
-                return keycode;
+                int keycode = int.Parse(keycodeMatch.Groups[1].Value);
+                string action = actionMatch.Groups[1].Value;
+
+                return new KeyInfo
+                {
+                    Keycode = keycode,
+                    Action = action
+                };
             }
-            return -1;
+
+            return null;
         }
+
+        public static bool IsLastRunInTimeSpan(ProcessInfo processInfoLastRun, int milliseconds)
+        {
+            if (processInfoLastRun == null)
+            {
+                return false;
+            }
+
+            DateTime currentTimestamp = DateTime.Now;
+            DateTime lastRunPlusInterval = processInfoLastRun.LastRun.AddMilliseconds(milliseconds);
+
+            return lastRunPlusInterval <= currentTimestamp;
+        }
+
+        public static bool IsProcessIdRunning(int processId)
+        {
+            try
+            {
+                return Process.GetProcesses().Any(p => p.Id == processId);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        public static int? FindProcessIdByName(string name)
+        {
+            try
+            {
+                var processes = Process.GetProcessesByName(name);
+                if (processes.Length > 0)
+                {
+                    return processes[0].Id;
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Fehler beim Suchen des Prozesses: {ex.Message}");
+                return null;
+            }
+        }
+
+
+        public static void SwitchToProcess(int processId)
+        {
+            try
+            {
+                Process process = Process.GetProcessById(processId);
+                IntPtr mainWindowHandle = process.MainWindowHandle;
+
+                if (mainWindowHandle != IntPtr.Zero)
+                {
+                    ShowWindowAsync(mainWindowHandle, SW_RESTORE);
+                    SetForegroundWindow(mainWindowHandle);
+                }
+                else
+                {
+                   log.Info("Das Hauptfenster des Prozesses wurde nicht gefunden.");
+                }
+            }
+            catch (ArgumentException)
+            {
+                log.Error("Es wurde kein Prozess mit der angegebenen ID gefunden.");
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Fehler beim Wechseln zum Prozess: {ex.Message}");
+            }
+        }
+
     }
 
-    // Zusätzliche Klassen (ProcessLog, ProcessInfo, KeyMapping) müssen wie zuvor definiert werden
+   
+
 }
