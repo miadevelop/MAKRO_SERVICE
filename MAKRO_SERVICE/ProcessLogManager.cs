@@ -75,12 +75,24 @@ namespace MAKRO_SERVICE
                     throw new ArgumentException("ProgramName darf nicht null oder leer sein.", nameof(programName));
                 }
 
+              
+
+                // Suche im ExecutionPath, wenn programName nicht direkt gefunden wurde
+                var matchingProcessInfo = _processInfoDictionary.Values
+                    .FirstOrDefault(p => p.ExecutionPath != null && p.ExecutionPath.Contains(programName, StringComparison.OrdinalIgnoreCase));
+
+                if (matchingProcessInfo != null)
+                {
+                    log.Info($"ProcessInfo für '{programName}' im ExecutionPath gefunden: {matchingProcessInfo.ExecutionPath}");
+                    return matchingProcessInfo;
+                }
+
                 if (_processInfoDictionary.TryGetValue(programName, out var processInfo))
                 {
                     return processInfo;
                 }
 
-                log.Warn($"Kein ProcessInfo für ProgramName '{programName}' gefunden.");
+                log.Warn($"Kein ProcessInfo für ProgramName '{programName}' gefunden, weder direkt noch im ExecutionPath.");
                 return null;
             }
             catch (Exception ex)
@@ -148,7 +160,7 @@ namespace MAKRO_SERVICE
                         ProcessInfo processInfo = new ProcessInfo
                         {
                             ProcessId = 0,
-                            ProgramName = System.IO.Path.GetFileName(keyMappingEntry.execution),
+                            ProgramName = keyMappingEntry.application,
                             ExecutionPath = keyMappingEntry.execution,
                             LastRun = DateTime.Now,
                             Counter = 0
@@ -172,6 +184,4 @@ namespace MAKRO_SERVICE
             }
         }
     }
-
-
 }
