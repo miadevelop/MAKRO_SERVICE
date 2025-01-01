@@ -6,9 +6,11 @@ using log4net;
 using log4net.Config;
 using System.Text.RegularExpressions;
 using System.Diagnostics;
-using System.Threading.Tasks;
 using System.Runtime.InteropServices;
+using System.Linq;
 using System.Threading;
+using System.Diagnostics.Metrics;
+using System.Reflection;
 
 namespace MAKRO_SERVICE
 {
@@ -16,16 +18,16 @@ namespace MAKRO_SERVICE
     {
         private static readonly ILog log = LogManager.GetLogger(typeof(Program));
         private static readonly string _processLogFilePath = Path.Combine(Directory.GetCurrentDirectory(), "process_log.json");
-        private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
-        private static readonly Dictionary<string, Task> _runningTasks = new Dictionary<string, Task>();
         private static ProcessLog _ProcessLog;
+        private static readonly object fileLock = new object();
+        private static ProcessLogManager _ProcessLogManager;
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
         [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); 
-     
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
@@ -34,22 +36,20 @@ namespace MAKRO_SERVICE
         private const int SW_SHOW = 5;
         private const int MillisecondsDelay = 1000;
         const string ACTION = "pressed";
-       
 
-
-        static async Task Main(string[] args)
+        static void Main(string[] args)
         {
             XmlConfigurator.Configure(new FileInfo("log4net.config"));
             log.Info("MAKRO_SERVICE started");
-            log.Info($"Process log: {_processLogFilePath}");
 
-            var keyMapping = LoadKeyMapping();
+            //Dictionary<string, KeyMappingEntry> key_mapping
+            KeyMapping keyMapping = LoadKeyMapping();
             if (keyMapping == null)
             {
                 log.Error("Fehler beim Laden des Key Mappings.");
                 return;
             }
-
+            initProcessLogManager(keyMapping);
             log.Info("Key Mapping erfolgreich geladen.");
 
             if (args.Length == 0)
@@ -61,10 +61,9 @@ namespace MAKRO_SERVICE
             string input = string.Join(" ", args);
             log.Info($"Eingabe: {input}");
 
-            
             KeyInfo keyInfo = ExtractKeyInfo(input);
             int keycode = keyInfo.Keycode;
-           
+
             if (!keyInfo.Action.ToLower().Contains(ACTION))
             {
                 log.Error($"Keycode '{keycode}', {keyInfo.Action}, abborted!");
@@ -82,189 +81,119 @@ namespace MAKRO_SERVICE
             var entry = keyMapping.key_mapping[keycode.ToString()];
             log.Info($"Keycode: {keycode}, Beschreibung: {entry.description}, Ausführung: {entry.execution}, Anwendung: {entry.application}");
 
-            if (!System.IO.File.Exists(_processLogFilePath))
-            {
-                SaveProcessInfo(0, "", "");
-            }
-            _ProcessLog = LoadProcessLog();
-            string applicationName=System.IO.Path.GetFileName(entry.execution);
+            string applicationName = Path.GetFileName(entry.execution);
 
-            ProcessInfo processInfoLastRun = GetProcessLogInfoByName(applicationName);
-
-            //IsLastRunInTimeSpan(ProcessInfo processInfoLastRun, int milliseconds)
-           
-            if( IsProcessIdRunning(processInfoLastRun.ProcessId))
+            if (findRunningApplicationAndSwitchTo(entry, applicationName))
             {
-                log.Info($"Prozess läuft schon, IsProcessIdRunning: {processInfoLastRun.ProcessId}, {processInfoLastRun.ProgramName} ");
-                SwitchToProcess(processInfoLastRun.ProcessId);
-                SaveProcessInfo(processInfoLastRun.ProcessId, processInfoLastRun.ProgramName, processInfoLastRun.ExecutionPath);
-                await Task.Delay(MillisecondsDelay);
                 return;
             }
 
-            int? currentProcessID = FindProcessIdByName(processInfoLastRun.ProgramName);
-            if (currentProcessID.HasValue)
+            ProcessInfo processInfoLastRun = _ProcessLogManager.GetProcessInfo(applicationName);
+
+            if (processInfoLastRun != null)
             {
-                log.Info($"Prozess läuft schon, FindProcessIdByName: {currentProcessID.Value}, {processInfoLastRun.ProgramName}");
-                SwitchToProcess(currentProcessID.Value);
-                SaveProcessInfo(processInfoLastRun.ProcessId, processInfoLastRun.ProgramName, processInfoLastRun.ExecutionPath);
-                await Task.Delay(MillisecondsDelay);
-                return;
+                log.Info($"Processinfo LastRun: {processInfoLastRun.ProcessId}, {processInfoLastRun.ProgramName}, {processInfoLastRun.LastRun}, {processInfoLastRun.Counter} ");
             }
 
 
-            await ExecuteProgramAsync(entry.execution, MillisecondsDelay);
+
+            ExecuteProgram(entry.execution);
         }
-        static async Task ExecuteProgramAsync(string execution, int millisecondsDelay)
-        {
-            string programFileName = Path.GetFileName(execution);
-            log.Info($"Starte ExecuteProgramAsync für {programFileName}");
 
-            await _semaphore.WaitAsync();
-            log.Info("Semaphore erhalten");
+        private static void initProcessLogManager(KeyMapping keyMapping)
+        {
+            log.Info($"Process log: {_processLogFilePath}");
+            _ProcessLogManager = new ProcessLogManager(_processLogFilePath, keyMapping);          
+
+        }
+
+        private static bool findRunningApplicationAndSwitchTo(KeyMappingEntry entry, string applicationName)
+        {
+            bool result = false;
+            var id = FindProcessIdByName(applicationName);
+            if (id != null)
+            {
+                try
+                {
+                    int currentProcessID = id.Value;
+                    log.Info($"switch to: {currentProcessID}");
+                    ProcessInfo oldInfo = _ProcessLogManager.GetProcessInfo(applicationName);
+                    int counter = oldInfo.Counter;
+                    counter = counter + 1;
+                    ProcessInfo newProcess = new ProcessInfo
+                    {
+                        ProcessId = currentProcessID,
+                        ProgramName = applicationName,
+                        ExecutionPath = entry.execution,
+                        LastRun = DateTime.Now,
+                        Counter = counter
+                    };
+                    log.Info($"aktualisiere Processinfo: {newProcess.ProcessId}, {newProcess.ProgramName}, {newProcess.ExecutionPath}, {newProcess.LastRun}, {newProcess.Counter}");
+                    _ProcessLogManager.PutProcessInfo(newProcess);
+                    result = SwitchToProcess(currentProcessID);
+
+                    return result;
+
+                }
+                catch (Exception ex)
+                {
+                    log.Error(ex.Message);
+                }
+            }
+            return result;
+        }
+
+        static void ExecuteProgram(string execution)
+        {
 
             try
             {
-                if (_runningTasks.TryGetValue(programFileName, out var existingTask) && !existingTask.IsCompleted)
+                string programFileName = Path.GetFileName(execution);
+                string programDirectory = Path.GetDirectoryName(execution);
+
+                log.Info($"Starte ExecuteProgram für {programFileName}, in {programDirectory}");
+                if (!string.IsNullOrEmpty(programDirectory))
                 {
-                    log.Info($"Programm '{programFileName}' wird bereits ausgeführt.");
-                    return;
+                    Directory.SetCurrentDirectory(programDirectory);
+                    log.Info($"Verzeichnis gewechselt zu: {programDirectory}");
                 }
 
-                log.Info($"Starte ExecuteProgramInternalAsync für {programFileName}");
-                var task = ExecuteProgramInternalAsync(execution, millisecondsDelay);
-                _runningTasks[programFileName] = task;
-                await task;
-                log.Info($"ExecuteProgramInternalAsync für {programFileName} abgeschlossen");
-            }
-            catch (Exception ex)
-            {
-                log.Error($"Fehler in ExecuteProgramAsync: {ex.Message}");
-            }
-            finally
-            {
-                _semaphore.Release();
-                log.Info("Semaphore freigegeben");
-            }
-        }
+                var processStartInfo = new ProcessStartInfo
+                {
+                    FileName = execution,
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Maximized,
+                    WorkingDirectory = programDirectory,
+                };
 
-       
 
-        static async Task ExecuteProgramInternalAsync(string execution, int millisecondsDelay)
-        {
-            string programDirectory = Path.GetDirectoryName(execution);
-            string programFileName = Path.GetFileName(execution);
-
-            if (!string.IsNullOrEmpty(programDirectory))
-            {
-                Directory.SetCurrentDirectory(programDirectory);
-                log.Info($"Verzeichnis gewechselt zu: {programDirectory}");
-            }
-
-            var existingProcess = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(programFileName))
-                                         .FirstOrDefault(p => !p.HasExited);
-
-            if (existingProcess != null)
-            {
-                ShowWindow(existingProcess.MainWindowHandle, SW_SHOW);
-                SetForegroundWindow(existingProcess.MainWindowHandle);
-                log.Info($"Fenster für bereits laufendes Programm '{programFileName}' in den Vordergrund geholt.");
-                return;
-            }
-
-            var processStartInfo = new ProcessStartInfo
-            {
-                FileName = execution,
-                UseShellExecute = true,
-                WindowStyle = ProcessWindowStyle.Maximized
-            };
-
-            try
-            {
                 using (var process = Process.Start(processStartInfo))
                 {
-                    if (process != null)
+                    ProcessInfo oldInfo = _ProcessLogManager.GetProcessInfo(programFileName);
+                    int counter = oldInfo.Counter;
+                    counter = counter + 1;
+
+
+                    ProcessInfo newProcess = new ProcessInfo
                     {
-                        SaveProcessInfo(process.Id, programFileName, execution);
-
-                        // Verzögerung hinzufügen, um sicherzustellen, dass das Programm korrekt gestartet wurde
-                        await Task.Delay(MillisecondsDelay);
-
-                        // Fenster in den Vordergrund holen
-                        ShowWindow(process.MainWindowHandle, SW_SHOW);
-                        SetForegroundWindow(process.MainWindowHandle);
-
-                        log.Info($"Programm gestartet: {execution}");
-                        await process.WaitForExitAsync();
-                    }
+                        ProcessId = process.Id,
+                        ProgramName = programFileName,
+                        ExecutionPath = execution,
+                        LastRun = DateTime.Now,
+                        Counter = counter
+                    };
+                    log.Info($"aktualisiere Processinfo: {newProcess.ProcessId}, {newProcess.ProgramName}, {newProcess.ExecutionPath}, {newProcess.LastRun}, {newProcess.Counter}");
+                    _ProcessLogManager.PutProcessInfo(newProcess);
                 }
-                log.Info($"Programm gestartet und beendet: {execution}");
-            }
-            catch (Exception ex)
-            {
-                log.Error($"Fehler beim Starten des Programms '{programFileName}': {ex.Message}");
-            }
-            finally
-            {
-                await Task.Delay(millisecondsDelay);
-            }
-        }
-
-        static void SaveProcessInfo(int processId, string programName, string executionPath)
-        {
-            var processLog = LoadProcessLog();
-            var existingProcessInfo = processLog.ProcessInfos.Find(p => p.ProgramName.Equals(programName, StringComparison.OrdinalIgnoreCase));
-
-            if (existingProcessInfo != null)
-            {
-                existingProcessInfo.ProcessId = processId;
-                existingProcessInfo.LastRun = DateTime.Now;
-                existingProcessInfo.Counter++;
-            }
-            else
-            {
-                processLog.ProcessInfos.Add(new ProcessInfo
-                {
-                    ProcessId = processId,
-                    ProgramName = programName,
-                    ExecutionPath = executionPath,
-                    LastRun = DateTime.Now,
-                    Counter = 1
-                });
-            }
-
-            string json = JsonSerializer.Serialize(processLog);
-            File.WriteAllText(_processLogFilePath, json);
-        }
-
-        static ProcessLog LoadProcessLog()
-        {
-            try
-            {
-                if (File.Exists(_processLogFilePath))
-                {
-                    string json = File.ReadAllText(_processLogFilePath);
-                    return JsonSerializer.Deserialize<ProcessLog>(json) ?? new ProcessLog();
-                }
-                return new ProcessLog();
             }
             catch (Exception ex)
             {
 
                 log.Error(ex.Message);
-                return null;
-            }
-        }
-        public static ProcessInfo GetProcessLogInfoByName(string programName)
-        {
-            if (_ProcessLog == null || _ProcessLog.ProcessInfos == null)
-            {
-                return null;
             }
 
-            return _ProcessLog.ProcessInfos.FirstOrDefault(p =>
-                p.ProgramName.Equals(programName, StringComparison.OrdinalIgnoreCase));
         }
+
 
 
         static void displayMappingList(KeyMapping keyMapping)
@@ -283,11 +212,10 @@ namespace MAKRO_SERVICE
                 log.Error("Die KeyMapping-Datei wurde nicht gefunden!");
                 return null;
             }
-
             try
             {
                 string jsonString = File.ReadAllText(keyMappingFilePath);
-                var keyMapping = JsonSerializer.Deserialize<KeyMapping>(jsonString);
+                KeyMapping keyMapping = JsonSerializer.Deserialize<KeyMapping>(jsonString);
                 if (keyMapping == null || keyMapping.key_mapping == null)
                 {
                     log.Error("Fehler: Das Key Mapping konnte nicht deserialisiert werden.");
@@ -306,19 +234,12 @@ namespace MAKRO_SERVICE
         {
             var keycodeMatch = Regex.Match(input, @"keycode:\s*(\d+)");
             var actionMatch = Regex.Match(input, @"action:\s*(pressed|released)");
-
             if (keycodeMatch.Success && actionMatch.Success)
             {
                 int keycode = int.Parse(keycodeMatch.Groups[1].Value);
                 string action = actionMatch.Groups[1].Value;
-
-                return new KeyInfo
-                {
-                    Keycode = keycode,
-                    Action = action
-                };
+                return new KeyInfo { Keycode = keycode, Action = action };
             }
-
             return null;
         }
 
@@ -328,10 +249,8 @@ namespace MAKRO_SERVICE
             {
                 return false;
             }
-
             DateTime currentTimestamp = DateTime.Now;
             DateTime lastRunPlusInterval = processInfoLastRun.LastRun.AddMilliseconds(milliseconds);
-
             return lastRunPlusInterval <= currentTimestamp;
         }
 
@@ -365,22 +284,24 @@ namespace MAKRO_SERVICE
             }
         }
 
-
-        public static void SwitchToProcess(int processId)
+        public static bool SwitchToProcess(int processId)
         {
+            bool result = false;
             try
             {
                 Process process = Process.GetProcessById(processId);
                 IntPtr mainWindowHandle = process.MainWindowHandle;
-
                 if (mainWindowHandle != IntPtr.Zero)
                 {
                     ShowWindowAsync(mainWindowHandle, SW_RESTORE);
                     SetForegroundWindow(mainWindowHandle);
+                    result = true;
+                    return result;
                 }
                 else
                 {
-                   log.Info("Das Hauptfenster des Prozesses wurde nicht gefunden.");
+                    log.Info("Das Hauptfenster des Prozesses wurde nicht gefunden.");
+                    return result;
                 }
             }
             catch (ArgumentException)
@@ -390,11 +311,9 @@ namespace MAKRO_SERVICE
             catch (Exception ex)
             {
                 log.Error($"Fehler beim Wechseln zum Prozess: {ex.Message}");
+                return result;
             }
+            return result;
         }
-
     }
-
-   
-
 }
